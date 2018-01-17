@@ -1,7 +1,10 @@
 from noodles import (schedule, schedule_hint)
+from noodles.run.run_with_prov import run_parallel_opt
+from noodles.display import NCDisplay
+from cslib.noodles import registry
 
 from cslib import Settings, Q_
-from cslib.dcs import DCS
+from cslib.cs_table import DCS
 from elsepa import elscata
 import numpy as np
 
@@ -24,40 +27,40 @@ def s_get_dcs(result, energies):
         return s[:9] + s[10:]
 
     dcs_keys = [mangle_energy(e) for e in energies]
-    angles = result[dcs_keys[0]]['THETA']
+    angles = np.cos(result[dcs_keys[0]]['THETA'])
     dcs = np.array([result[k]['DCS[0]'].to('cm²/sr').magnitude
                    for k in dcs_keys]) * Q_('cm²/sr')
 
-    return DCS(angles, energies[:, None], dcs,
-               x_units='rad', y_units='eV', log='y')
+    return DCS(energies[:, None], angles[::-1], dcs[:,::-1])
 
 
 @schedule
 def s_join_dcs(*dcs_lst):
-    angle = dcs_lst[0].x
     energy = np.concatenate(
-        [dcs.y for dcs in dcs_lst], axis=0) \
-        * dcs_lst[0].y.units
+        [dcs.energy for dcs in dcs_lst], axis=0) \
+        * dcs_lst[0].energy.units
+    angle = dcs_lst[0].q
     cs = np.concatenate(
-        [dcs.z for dcs in dcs_lst], axis=0) \
-        * dcs_lst[0].z.units
-    return DCS(angle, energy, cs, log='y')
+        [dcs.cs for dcs in dcs_lst], axis=0) \
+        * dcs_lst[0].cs.units
+    return DCS(energy, angle, cs)
 
 
 @schedule
 def s_sum_dcs(material, **dcs):
-    cs = sum(element.count * dcs[symbol].z
+    cs = material.rho_n * sum(element.count * dcs[symbol].cs
              for symbol, element in material.elements.items())
     first = next(iter(dcs))
-    return DCS(dcs[first].x, dcs[first].y, cs, log='y')
+    return DCS(dcs[first].energy, dcs[first].q, cs)
 
 
-def s_mott_cs(material: Settings, energies, split=4, mabs=False):
-    """Compute Mott crosssections.
+def mott_cs(material: Settings, energies, threads=4, mabs=False):
+    """Compute Mott cross sections.
 
     Runs `elscata` for each element in the material. Then adds
     the cross-sections proportional to the composition of the
-    material.
+    material and returns differential inverse mean free paths
+    as function of energy and cos(theta).
 
     :param material:
         Settings object containing parameters for this material.
@@ -65,16 +68,15 @@ def s_mott_cs(material: Settings, energies, split=4, mabs=False):
         Array quantity, 1-d array with dimension of energy.
     :param mabs:
         Enable absorbtion potential (computations can take longer).
-    :param split:
+    :param threads:
         Elsepa can take a long time to compute. This splits the
-        `energies` array in `split` parts, creating as many jobs
-        that may run in parallel.
+        `energies` array in several parts, and runs them in parallel.
     """
     def split_array(a, n):
         m = np.arange(0, a.size, a.size/n)[1:].astype(int)
         return np.split(a, m)
 
-    chunks = split_array(energies, split)
+    chunks = split_array(energies, min(3*threads, len(energies)))
 
     def s_atomic_dcs(Z):
         no_muffin_Z = [1, 7, 8]
@@ -91,4 +93,10 @@ def s_mott_cs(material: Settings, energies, split=4, mabs=False):
 
     dcs = {symbol: s_atomic_dcs(element.Z)
            for symbol, element in material.elements.items()}
-    return s_sum_dcs(material, **dcs)
+    with NCDisplay() as display:
+        mcs = run_parallel_opt(
+            s_sum_dcs(material, **dcs),
+            n_threads=threads, registry=registry,
+            jobdb_file='cache.json', display=display)
+
+    return mcs

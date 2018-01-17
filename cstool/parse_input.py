@@ -17,8 +17,8 @@ from cslib.predicates import (
     predicate,
     is_string, is_integer, file_exists, has_units, is_none, is_)
 
-from .phonon_loss import phonon_loss
-from .elf import ELF
+from cstool.phonon import phonon_loss
+from cstool.dielectric_function import ELF
 
 
 def pprint_settings(model, settings):

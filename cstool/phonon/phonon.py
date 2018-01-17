@@ -2,10 +2,7 @@
 # See /doc/extra/phonon-scattering.lyx
 
 from cslib import units, Settings
-from cslib.dcs import DCS
-from cslib.numeric import (log_interpolate)
-
-from cstool.parse_input import read_input
+from cslib.numeric import log_interpolate_f as log_interpolate
 
 from math import pi
 
@@ -60,8 +57,6 @@ def phonon_crosssection(M, rho_m, eps_ac, c_s, alpha,
 
     # A: screening factor (eV); 5 is constant for every material.
     A = 5 * E_BZ
-    # rho_n: number density.
-    rho_n = (units.N_A / M * rho_m).to('cm⁻³')
 
     h_bar_w_BZ = (units.hbar * (c_s * k_BZ - alpha * k_BZ**2)) \
         .to('eV')    # Verduin Eq. 3.114
@@ -69,9 +64,9 @@ def phonon_crosssection(M, rho_m, eps_ac, c_s, alpha,
     # Acoustic phonon population density , Verduin Eq. 3.117
     n_BZ = 1 / expm1(h_bar_w_BZ / (units.k * T))
 
-    # Verduin equation (3.125) divided by number density
-    sigma_ac = ((np.sqrt(m_eff * m_dos**3) * eps_ac**2 * units.k * T) /
-                (pi * units.hbar**4 * c_s**2 * rho_m * rho_n)).to('cm²')
+    # Verduin equation (3.125)
+    l_ac = ((np.sqrt(m_eff * m_dos**3) * eps_ac**2 * units.k * T) /
+            (pi * units.hbar**4 * c_s**2 * rho_m)).to('cm⁻¹')
 
     # extra multiplication factor for high energies according to Verduin
     # equation (3.126) noticed that A could be balanced out of the equation
@@ -79,15 +74,12 @@ def phonon_crosssection(M, rho_m, eps_ac, c_s, alpha,
                    (h_bar_w_BZ * units.k * T)).to('1/eV')
     # alpha = ((n_BZ + 0.5) * 8 * h_bar_w_BZ / (units.k*T * E_BZ)).to('1/eV')
 
-    def mu(theta):  # see Eq. 3.126
-        return (1 - cos(theta)) / 2
-
     def norm(mu, E):
         """Phonon cross-section for low energies.
 
         :param E: energy in Joules.
         :param theta: angle in radians."""
-        return (sigma_ac / (4 * pi * (1 + mu * E / A)**2)).to('cm²')
+        return (l_ac / (4 * pi * (1 + mu * E / A)**2)).to('cm⁻¹')
 
     def dcs_hi(mu, E):
         """Phonon cross-section for high energies.
@@ -96,16 +88,16 @@ def phonon_crosssection(M, rho_m, eps_ac, c_s, alpha,
         :param theta: angle in radians."""
         return (factor_high * mu * E).to(units.dimensionless)
 
-    def dcs(theta, E):
-        m = mu(theta)
+    def dcs(E, costheta):
+        m = .5 * (1 - costheta) # see Eq. 3.126
 
         g = interpolate(
-            lambda E: 1, partial(dcs_hi, m),
+            lambda E: 1*units.dimensionless, partial(dcs_hi, m),
             h, E_BZ / 4, E_BZ)
 
         return g(E) * norm(m, E) * 3.0
 
-    # should have units of m²/sr
+    # should have units of m⁻¹/sr
     return dcs
 
 
@@ -158,8 +150,6 @@ def phonon_crosssection_dual_branch(
 
     # A: screening factor (eV); 5 is constant for every material.
     A = 5 * E_BZ
-    # rho_n: number density.
-    rho_n = (units.N_A / M * rho_m).to('cm⁻³')
 
     h_bar_w_BZ_lo = (units.hbar * (c_s_lo * k_BZ - alpha_lo * k_BZ**2)) \
         .to('eV')    # Verduin Eq. 3.114
@@ -170,19 +160,15 @@ def phonon_crosssection_dual_branch(
     n_BZ_lo = 1 / expm1(h_bar_w_BZ_lo / (units.k * T))
     n_BZ_tr = 1 / expm1(h_bar_w_BZ_tr / (units.k * T))
 
-    # Verduin equation (3.125) divided by number density without branch
-    # dependent parameters
-    sigma_ac = ((np.sqrt(m_eff * m_dos**3) * units.k * T) /
-                (pi * units.hbar**4 * rho_m * rho_n)).to('s²/kg²')
+    # Verduin equation (3.125) without branch-dependent parameters
+    l_ac = ((np.sqrt(m_eff * m_dos**3) * units.k * T) /
+            (pi * units.hbar**4 * rho_m)).to('s²/kg²/m³')
 
     # extra multiplication factor for high energies according to Verduin
     # equation (3.126) noticed that A could be balanced out of the equation
     # without branch dependent parameters
     factor_high = (8 * m_dos / (units.k * T)).to('kg/eV')
     # alpha = ((n_BZ + 0.5) * 8 * h_bar_w_BZ / (units.k*T * E_BZ)).to('1/eV')
-
-    def mu(theta):  # see Eq. 3.126
-        return (1 - cos(theta)) / 2
 
     def dcs_lo(mu, E):
         """Phonon cross-section for low energies.
@@ -191,8 +177,8 @@ def phonon_crosssection_dual_branch(
         :param theta: angle in radians."""
         two_branch_factor = 1. * (eps_ac_lo**2 / c_s_lo**2) + \
             2. * (eps_ac_tr**2 / c_s_tr**2)
-        return (sigma_ac * two_branch_factor /
-                (4 * pi * (1 + mu * E / A)**2)).to('cm²')
+        return (l_ac * two_branch_factor / \
+                (4 * pi * (1 + mu * E / A)**2)).to('cm⁻¹')
 
     def dcs_hi(mu, E):
         """Phonon cross-section for high energies.
@@ -202,11 +188,11 @@ def phonon_crosssection_dual_branch(
         two_branch_factor = \
             1. * ((n_BZ_lo + 0.5) * eps_ac_lo**2 / h_bar_w_BZ_lo) + \
             2. * ((n_BZ_tr + 0.5) * eps_ac_tr**2 / h_bar_w_BZ_tr)
-        return ((sigma_ac * factor_high * two_branch_factor * mu * E) /
-                (4 * pi * (1 + mu * E / A)**2)).to('cm²')
+        return ((l_ac * factor_high * two_branch_factor * mu * E) /
+                (4 * pi * (1 + mu * E / A)**2)).to('cm⁻¹')
 
-    def dcs(theta, E):
-        m = mu(theta)
+    def dcs(E, costheta):
+        m = .5 * (1 - costheta) # see Eq. 3.126
 
         g = interpolate(
             partial(dcs_lo, m), partial(dcs_hi, m),
@@ -214,7 +200,7 @@ def phonon_crosssection_dual_branch(
 
         return g(E)
 
-    # should have units of m²/sr
+    # should have units of m⁻¹/sr
     return dcs
 
 
@@ -243,26 +229,3 @@ def phonon_cs_fn(s: Settings):
             s.phonon.lattice, T=units.T_room,
             interpolate=log_interpolate)  # , h=lambda x: x)
 
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description='Calculate elastic phonon cross-sections for a material.')
-    parser.add_argument(
-        'material_file', type=str,
-        help="Filename of material in YAML format.")
-    args = parser.parse_args()
-
-    s = read_input(args.material_file)
-    if 'M_tot' not in s:
-        s.M_tot = sum(e.M * e.count for e in s.elements.values())
-
-    E_range = np.logspace(log10(0.01), log10(1000), num=100) * units.eV
-    theta_range = np.linspace(0, pi, num=100) * units.rad
-
-    csf = phonon_cs_fn(s)
-    cs = DCS(theta_range, E_range[:, None], csf(theta_range, E_range[:, None]),
-             x_units='rad', y_units='eV', z_units='cm²', log='y')
-
-    cs.save_gnuplot('{}_phonon.bin'.format(s.name))

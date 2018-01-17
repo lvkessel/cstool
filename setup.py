@@ -13,7 +13,7 @@ with open(path.join(here, 'README.rst'), encoding='utf-8') as f:
 
 setup(
     name='cstool',
-    version='0.1.0',
+    version='0.2.0',
     long_description=long_description,
     description='Computes cross-sections from several sources and'
                 ' compiles them into a material file for the e-Scatter'
@@ -33,8 +33,8 @@ setup(
         'Programming Language :: Python :: 3',
         'Topic :: Scientific/Engineering :: Physics'],
     install_requires=[
-        'pint==0.8.1', 'numpy==1.13.0', 'cslib==0.1.0', 'pyelsepa>=0.1.1', 'noodles==0.2.3', 'tinydb==3.3.1',
-        'ruamel.yaml==0.15.15'],
+        'pint==0.8.1', 'numpy==1.13.0', 'cslib==0.2.0', 'pyelsepa>=0.1.1',
+        'noodles==0.2.3', 'numba==0.35.0', 'tinydb==3.3.1', 'ruamel.yaml==0.15.15'],
     extras_require={
         'test': ['pytest', 'pytest-cov', 'pep8', 'pyflakes'],
         'dev': ['pytest', 'pytest-cov', 'pep8', 'pyflakes', 'sphinx'],

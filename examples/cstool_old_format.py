@@ -1,40 +1,53 @@
-from noodles.run.run_with_prov import run_parallel_opt
-from noodles.display import NCDisplay
-
 from cstool.parse_input import read_input, pprint_settings, cstool_model
-from cstool.mott import s_mott_cs
+from cstool.mott import mott_cs
 from cstool.phonon import phonon_cs_fn
-from cstool.inelastic import inelastic_cs_fn
+from cstool.dielectric_function import dimfp_kieft
 from cstool.compile import compute_tcs_icdf
-from cstool.ionization import ionization_shells, outer_shell_energies, \
-                              loglog_interpolate as ion_loglog_interp
-from cslib.noodles import registry
-from cslib import units
-from cslib.dcs import DCS
-from cslib.numeric import log_interpolate
+from cstool.endf import ionization_shells
+from cslib import units, Settings
+from cslib.numeric import log_interpolate_f, loglog_interpolate
 
 import numpy as np
 import h5py as h5
 
 
 def compute_elastic_tcs_icdf(dcs, P):
-    def integrant(theta):
-        return dcs(theta) * 2 * np.pi * np.sin(theta)
+    def integrand(costheta):
+        return dcs(costheta) * 2 * np.pi
 
-    return compute_tcs_icdf(integrant, 0*units('rad'), np.pi*units('rad'), P)
+    return compute_tcs_icdf(integrand, P,
+        np.linspace(-1, 1, 100000))
 
 
 def compute_inelastic_tcs_icdf(dcs, P, K0, K, max_interval):
-    def integrant(w):
-        return dcs(w)
+    return compute_tcs_icdf(dcs, P,
+        np.linspace(K0, K.to(K0.units), max(100000,
+            int(np.ceil((K - K0) / max_interval)))
+        )*K.units)
 
-    return compute_tcs_icdf(integrant, K0, K, P,
-        sampling = np.max([100000,
-            int(np.ceil((K - K0) / max_interval))
-            ]))
+
+def outer_shell_energies(s: Settings):
+    osi_energies = s.elf_file.get_outer_shells()
+    osi_energies = np.delete(osi_energies.to('eV').magnitude,
+        np.where(osi_energies >= 100*units.eV)) * units.eV
+
+    def osi_fun(K):
+        # pick the largest energy which is larger than K
+        E = np.ndarray(K.shape) * units.eV
+        E[:] = np.nan
+        for B in sorted(osi_energies):
+            E[K > B] = B
+        return E
+
+    return osi_fun
 
 
 if __name__ == "__main__":
+    print("-------------------------------------------------------------------------------");
+    print(" THIS SCRIPT GENERATES MATERIAL DATA IN AN OLD FORMAT.")
+    print(" IT IS NOT BEING MAINTAINED, AND IS ONLY USED BY DEPRECATED SIMULATORS.")
+    print(" DO NOT USE UNLESS YOU KNOW WHAT YOU ARE DOING.")
+    print("-------------------------------------------------------------------------------");
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -57,21 +70,16 @@ if __name__ == "__main__":
     print("# Computing Mott cross-sections using ELSEPA.")
 
     e_mcs = np.logspace(1, 5, 145) * units.eV
-    f_mcs = s_mott_cs(s, e_mcs, split=12, mabs=False)
-
-    with NCDisplay() as display:
-        mcs = run_parallel_opt(
-            f_mcs, n_threads=4, registry=registry,
-            jobdb_file='cache.json', display=display)
+    mcs = mott_cs(s, e_mcs, threads=4, mabs=False)
 
     print("# Merging elastic scattering processes.")
 
-    def elastic_cs_fn(a, E):
-        return log_interpolate(
-            lambda E: phonon_cs_fn(s)(a, E).to('cm^2').magnitude,
-            lambda E: mcs.unsafe(a, E.to('eV').magnitude.flat),
+    def elastic_cs_fn(E, costheta):
+        return log_interpolate_f(
+            lambda E: phonon_cs_fn(s)(E, costheta),
+            lambda E: mcs(E, costheta),
             lambda x: x, 100*units.eV, 200*units.eV
-        )(E)*units('cm^2/rad')
+        )(E) / s.rho_n
 
     properties = {
         'fermi': (s.band_structure.fermi, 'eV'),
@@ -111,11 +119,11 @@ if __name__ == "__main__":
     el_icdf.attrs['units'] = 'radian'
     print("# Computing elastic total cross-sections and iCDFs.")
     for i, K in enumerate(e_el):
-        def dcs(theta):
-            return elastic_cs_fn(theta, K)
+        def dcs(costheta):
+            return elastic_cs_fn(K, costheta)
         tcs, icdf = compute_elastic_tcs_icdf(dcs, p_el)
         el_tcs[i] = tcs.to('m^2')
-        el_icdf[i] = icdf.to('rad')
+        el_icdf[i] = (np.arccos(icdf).to('rad'))[::-1]
         print('.', end='', flush=True)
     print()
 
@@ -137,7 +145,7 @@ if __name__ == "__main__":
         # scattering event
 
         def dcs(w):
-            return inelastic_cs_fn(s)(K, w)
+            return dimfp_kieft(K, w, s) / s.rho_n
         tcs, icdf = compute_inelastic_tcs_icdf(dcs, p_inel,
             s.elf_file.get_min_energy(), w0_max,
             s.elf_file.get_min_energy_interval())
@@ -159,7 +167,7 @@ if __name__ == "__main__":
         margin = 10*units.eV
         i_able = ((e_ion+margin) > shell['B'])
         j_able = (shell['K'] > shell['B']) & (shell['cs'] > 0*units('m^2'))
-        shell['cs_at_K'][i_able] = ion_loglog_interp(
+        shell['cs_at_K'][i_able] = loglog_interpolate(
             shell['K'][j_able], shell['cs'][j_able])((e_ion+margin)[i_able]).to('m^2')
         tcstot_at_K += shell['cs_at_K']
 

@@ -38,6 +38,22 @@ class ELF:
         intervals = self.__elf_x[1:] - self.__elf_x[:-1]
         return np.min(intervals)
 
+    def get_serialized(self):
+        log_x = np.log(self.__elf_x.to('hartree').magnitude)
+        log_y = np.log(self.__elf_y)
+        min_interval = np.min(log_x[1:] - log_x[:-1])
+
+        lx_min = log_x[0]
+        lx_max = log_x[-1]
+        N_points = int(np.ceil((lx_max - lx_min) / min_interval));
+        lx_step = (lx_max - lx_min) / (N_points - 1);
+
+        ly_data = np.interp(
+            np.linspace(lx_min, lx_max, N_points),
+            log_x, log_y);
+
+        return lx_min, lx_step, N_points, ly_data;
+
     def __call__(self, x):
         return self.get_elf(x)
 

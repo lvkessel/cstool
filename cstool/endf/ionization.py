@@ -1,6 +1,7 @@
 from .parse_endf import parse_zipfiles
 
 from cslib import units, Settings
+from cslib.numeric import loglog_interpolate
 
 import numpy as np
 import os
@@ -11,36 +12,9 @@ from hashlib import sha1
 from pkg_resources import resource_string, resource_filename
 
 
-def loglog_interpolate(x_i, y_i):
-    """Interpolates the tabulated values. Linear interpolation
-    on a log-log scale.
-    Out-of-range behaviour: extrapolation."""
-
-    assert y_i.shape == x_i.shape, "shapes should match"
-
-    x_log_steps = np.log(x_i[1:]/x_i[:-1])
-    log_y_i = np.log(y_i.magnitude)
-
-    def f(x):
-        x_idx = np.searchsorted(x_i.magnitude.flat,
-                                x.to(x_i.units).magnitude.flat)
-        mx_idx = np.clip(x_idx - 1, 0, x_i.size - 2)
-
-        # compute the weight factor
-        w = np.log(x / np.take(x_i, mx_idx)) \
-            / np.take(x_log_steps, mx_idx)
-
-        y = (1 - w) * np.take(log_y_i, mx_idx) \
-            + w * np.take(log_y_i, mx_idx + 1)
-
-        return np.exp(y) * y_i.units
-
-    return f
-
-
 def obtain_endf_files():
-    sources = json.loads(resource_string(__name__, 'data/endf_sources.json').decode("utf-8"))
-    endf_dir = resource_filename(__name__, 'data/endf_data')
+    sources = json.loads(resource_string(__name__, '../data/endf_sources.json').decode("utf-8"))
+    endf_dir = resource_filename(__name__, '../data/endf_data')
     os.makedirs(endf_dir, exist_ok=True)
     for name, source in sources.items():
         source['filename'] = '{}/{}.zip'.format(endf_dir, name)
@@ -92,17 +66,38 @@ def ionization_shells(s: Settings):
     return shells
 
 
-def outer_shell_energies(s: Settings):
-    osi_energies = s.elf_file.get_outer_shells()
-    osi_energies = np.delete(osi_energies.to('eV').magnitude,
-        np.where(osi_energies >= 100*units.eV)) * units.eV
+def compile_ionization_icdf(shells, K, p_ion):
+    # For each shell, get ionization cross sections as function of K and store in
+    # shell['cs_at_K']. Total cross section over all shells goes to tcstot_at_K.
+    tcstot_at_K = np.zeros(K.shape) * units('m^2')
+    for shell in shells:
+        shell['cs_at_K'] = np.zeros(K.shape) * units('m^2')
+        i_able = K > shell['B']
+        j_able = (shell['K'] > shell['B']) & (shell['cs'] > 0*units('m^2'))
+        shell['cs_at_K'][i_able] = loglog_interpolate(
+            shell['K'][j_able], shell['cs'][j_able])(K[i_able]).to('m^2')
+        tcstot_at_K += shell['cs_at_K']
 
-    def osi_fun(K):
-        # pick the largest energy which is larger then K
-        E = np.ndarray(K.shape) * units.eV
-        E[:] = np.nan
-        for B in sorted(osi_energies):
-            E[K > B] = B
-        return E
+    # shell['P_at_K'] is the ionization probability of the present shell as fraction of total.
+    # shell['Pcum_at_K'] is the cumulative probability for this shell and others before it.
+    Pcum_at_K = np.zeros(K.shape)
+    for shell in shells:
+        shell['P_at_K'] = np.zeros(K.shape)
+        i_able = (tcstot_at_K > 0*units('m^2'))
+        shell['P_at_K'][i_able] = shell['cs_at_K'][i_able]/tcstot_at_K[i_able]
+        Pcum_at_K += shell['P_at_K']
+        shell['Pcum_at_K'] = np.copy(Pcum_at_K)
 
-    return osi_fun
+    # Compute ICDF from Pcum_at_K.
+    ionization_icdf = np.ndarray((K.shape[0], p_ion.shape[0]))*units.eV
+    for j, P in enumerate(p_ion):
+        icdf_at_P = np.ndarray(K.shape) * units.eV
+        icdf_at_P[:] = np.nan
+        for shell in reversed(shells):
+            icdf_at_P[P <= shell['Pcum_at_K']] = shell['B']
+        ionization_icdf[:, j] = icdf_at_P
+    # Round-off error in Pcum_at_K may cause the last icdf_at_P to remain undefined
+    nans = np.logical_not(np.isfinite(ionization_icdf[:,-1]))
+    ionization_icdf[nans,-1] = ionization_icdf[nans,-2]
+
+    return ionization_icdf
