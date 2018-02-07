@@ -1,7 +1,6 @@
 import numpy as np
 from cslib.units import units
 from scipy.integrate import cumtrapz
-from scipy.interpolate import griddata
 
 def icdf(x, cdf, P):
     """Compute the Inverse Cumulative Distribution Function (ICDF), given the
@@ -37,15 +36,6 @@ def compute_tcs_icdf(f, P, eval_x):
     return cf[-1] * eval_x.units*y.units, \
            icdf(eval_x, cf/cf[-1], P)
 
-
-def evaluate_2d_func(function, eval_x, eval_y):
-    """Evaluate a 2D function on a regular grid of [eval_x, eval_y]. The
-    function should be of the form f(x_arr, y_arr), where x_arr and y_arr are
-    arrays of the same length, and f(x_arr, y_arr)[i] = f(x_arr[i], y_arr[i])
-    """
-    xx, yy = np.meshgrid(eval_x.magnitude, eval_y.magnitude, indexing='ij')
-    return function(xx.flatten()*eval_x.units, \
-        yy.flatten()*eval_y.units).reshape(xx.shape)
 
 def compute_2d_tcs_icdf(function_data, eval_x, eval_y, # Function, plus x and y coordinates at which to sample
     y_low_f, y_high_f,                                 # Range for which we are interested in the function. y_low_f and y_high_f must be within sample_y.

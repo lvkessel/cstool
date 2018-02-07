@@ -1,7 +1,6 @@
 from cslib import units
-from cstool.compile import compute_tcs_icdf, compute_2d_tcs_icdf, evaluate_2d_func
+from cstool.compile import compute_tcs_icdf, compute_2d_tcs_icdf
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
 
 
 def compile_ashley_imfp_icdf(dimfp,
@@ -57,8 +56,6 @@ def compile_full_imfp_icdf(elf_omega, elf_q, elf_data, # ELF data as function of
 
     K_units = units.eV
     q_units = units('nm^-1')
-    ELF_fn = RegularGridInterpolator((elf_omega.to(K_units).magnitude,
-        elf_q.to(q_units).magnitude), elf_data, bounds_error=False, fill_value=None)
 
     mc2 = units.m_e * units.c**2
 
@@ -66,16 +63,28 @@ def compile_full_imfp_icdf(elf_omega, elf_q, elf_data, # ELF data as function of
     # momentum boundaries from kinetic energy
     q_k = lambda _k : np.sqrt(2*units.m_e * _k*(1 + _k/(2 * mc2))) / units.hbar;
 
+    def dcs(omega, q):
+        # Linear interpolation, with extrapolation if out of bounds
+        def find_index(a, v):
+            low_i = np.clip(np.searchsorted(a, v, side='right')-1, 0, len(a)-2)
+            vl = a[low_i]
+            vh = a[low_i + 1]
+            return low_i, (v - vl) / (vh - vl)
+        low_x, frac_x = find_index(elf_omega.magnitude, omega.to(elf_omega.units).magnitude)
+        low_y, frac_y = find_index(elf_q.magnitude, q.to(elf_q.units).magnitude)
+        elf = (1-frac_x)*(1-frac_y) * elf_data[low_x, low_y] + \
+			frac_x*(1-frac_y) * elf_data[low_x+1, low_y] + \
+			(1-frac_x)*frac_y * elf_data[low_x, low_y+1] + \
+			frac_x*frac_y * elf_data[low_x+1, low_y+1]
+
+        elf[elf <= 0] = 0
+        return elf / q
+
     eval_omega = np.geomspace(elf_omega[0].to(K_units).magnitude, \
         (K[-1]-F).to(K_units).magnitude, 10000) * K_units
     eval_q = np.geomspace(q_k(elf_omega[0]).to(q_units).magnitude, \
         2*q_k(K[-1]).to(q_units).magnitude, 10000) * q_units
-
-    def dcs(omega, q):
-        result = ELF_fn((omega.to(K_units), q.to(q_units))) / q
-        result[result <= 0/q_units] = 0/q_units
-        return result
-    dcs_data = evaluate_2d_func(dcs, eval_omega, eval_q)
+    dcs_data = dcs(eval_omega[:,np.newaxis], eval_q)
 
     inel_imfp = np.zeros(K.shape) * units('nm^-1')
     inel_omega_icdf = np.zeros((K.shape[0], P_omega.shape[0])) * K_units
