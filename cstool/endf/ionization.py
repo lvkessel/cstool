@@ -1,7 +1,4 @@
-from .parse_endf import parse_zipfiles
-
 from cslib import units, Settings
-from cslib.numeric import loglog_interpolate
 
 import numpy as np
 import os
@@ -42,62 +39,113 @@ def obtain_endf_files():
     return sources
 
 
-def _ionization_shells(Z):
+# loglog interpolation: zero if out-of-bounds on the left.
+def interp_ll(x, xp, fp):
+    OK = fp>0
+    return np.exp(np.interp(
+        np.log(x),
+        np.log(xp[OK]),
+        np.log(fp[OK]),
+        left=-np.inf))
+
+from .parse_endf import parse_electrons
+from scipy.interpolate import griddata
+# K: Kinetic energy (or energies) of interest, in eV
+# omega: Energy loss(es) of interest, in eV
+# Returns two lists:
+#   Differential cross section dσ/dω in barn/eV for each shell
+#   Binding energy for each shell
+def get_dcs_loss(K, omega, Z):
     sources = obtain_endf_files()
-    return parse_zipfiles(sources['atomic_relax']['filename'],
-                          sources['electrons']['filename'],
-                          int(Z))
+    e_data = parse_electrons(sources['electrons']['filename'], Z)
+
+    dcs = []
+    binding = []
+
+    for rx in e_data.reactions.values():
+        if rx.MT <= 533:
+            continue
+
+        CS_shell = interp_ll(K, rx.cross_section.x, rx.cross_section.y)
+
+        # Read cross section data
+        primary_K = [p['E1'] for p in rx.products if p['ZAP'] == 11][0] # eV
+        recoil_E = [[pep.flatten() for pep in p['Ep']]
+                for p in rx.products if (p['ZAP'] == 11 and p['LAW'] == 1)][0] # eV
+        recoil_P = [[pb.flatten() for pb in p['b']]
+                for p in rx.products if (p['ZAP'] == 11 and p['LAW'] == 1)][0] # eV^-1
+
+        # Make symmetry in recoil_E and recoil_P explicit
+        for i in range(len(primary_K)):
+            K = primary_K[i]
+            re = recoil_E[i]
+            rp = recoil_P[i]
+
+            recoil_E[i] = np.r_[re,
+                K-rx.binding_energy-re[-2::-1]]
+            recoil_P[i] = np.r_[.5*rp,
+                .5*rp[-2::-1]]
+
+        # Obtain differential cross sections for desired K, omega
+        # by log-log-log interpolation
+        dcs.append(np.exp(griddata((
+            np.log(np.repeat(primary_K, [len(a) for a in recoil_E])),
+            np.log(np.concatenate(recoil_E) + rx.binding_energy)),
+            np.log(np.concatenate([recoil_P[i] for i in range(len(primary_K))])),
+            (np.log(K), np.log(omega)),
+            fill_value = -np.inf
+		))*CS_shell)
+
+        binding.append(rx.binding_energy)
+
+    return dcs, binding
 
 
-# Cross sections are premultiplied by their element's abundance and
-# sorted from outer (low binding energy) to inner (high binding).
-def ionization_shells(s: Settings):
+# K: 1D np array with kinetic energies of interest
+# omega_frac: 1D np array with fractional energy losses of interest
+#             (as fraction of K, between 0 and 1)
+# P: probabilities (between 0 and 1)
+# Returns 3D array, shape (len(K), len(omega_frac), len(P))
+def compile_ionization_icdf(s: Settings, K, omega_frac, P):
+    # len(K) x len(omega_frac) array of interesting energy losses
+    omega = K[:, np.newaxis] * omega_frac[np.newaxis, :]
+
+    # Generate sorted list of shells, sorted by binding energy.
+    # Each shell is represented by a dict:
+    #   - B: binding energy
+    #   - DIMFP (array, shape of omega): Differential inverse mean free path
     shells = []
-    for element_name, element in s.elements.items():
-        data = _ionization_shells(element.Z)
-        for n, shell in data.items():
-            K, cs = list(map(list, zip(*shell.cs.data)))
-            B = shell.energy
-            K = np.array(K)*units.eV
-            cs = np.array(cs)*units.barn
-            cs *= element.count
-            shells.append({'B': B, 'K': K, 'cs': cs})
-    shells.sort(key = lambda s : s['B']);
-    return shells
+    for element in s.elements.values():
+        dcs_element, binding_element = get_dcs_loss(
+            np.repeat(K.to(units.eV).magnitude, omega.shape[1]).reshape(omega.shape),
+            omega.to(units.eV).magnitude, element.Z)
 
+        for shelli in range(len(dcs_element)):
+            shells.append({
+                'B': binding_element[shelli] * units.eV,
+                'DIMFP': dcs_element[shelli] * units.barn
+                    * element.count * s.rho_n
+            })
+    shells.sort(key = lambda s : s['B'])
 
-def compile_ionization_icdf(shells, K, p_ion):
-    # For each shell, get ionization cross sections as function of K and store in
-    # shell['cs_at_K']. Total cross section over all shells goes to tcstot_at_K.
-    tcstot_at_K = np.zeros(K.shape) * units('m^2')
+    # Compute the running cumulative differential inverse mean free paths
+    # for each shell, and then normalize
+    total_DIMFP = np.zeros(omega.shape) / units.nm
     for shell in shells:
-        shell['cs_at_K'] = np.zeros(K.shape) * units('m^2')
-        i_able = K > shell['B']
-        j_able = (shell['K'] > shell['B']) & (shell['cs'] > 0*units('m^2'))
-        shell['cs_at_K'][i_able] = loglog_interpolate(
-            shell['K'][j_able], shell['cs'][j_able])(K[i_able]).to('m^2')
-        tcstot_at_K += shell['cs_at_K']
-
-    # shell['P_at_K'] is the ionization probability of the present shell as fraction of total.
-    # shell['Pcum_at_K'] is the cumulative probability for this shell and others before it.
-    Pcum_at_K = np.zeros(K.shape)
+        total_DIMFP += shell['DIMFP']
+        shell['DIMFP_cum'] = np.copy(total_DIMFP)
     for shell in shells:
-        shell['P_at_K'] = np.zeros(K.shape)
-        i_able = (tcstot_at_K > 0*units('m^2'))
-        shell['P_at_K'][i_able] = shell['cs_at_K'][i_able]/tcstot_at_K[i_able]
-        Pcum_at_K += shell['P_at_K']
-        shell['Pcum_at_K'] = np.copy(Pcum_at_K)
+        shell['P_cum'] = np.divide(shell['DIMFP_cum'], total_DIMFP,
+            out = np.zeros(shell['DIMFP_cum'].shape),
+            where = total_DIMFP > 0/units.nm)
 
-    # Compute ICDF from Pcum_at_K.
-    ionization_icdf = np.ndarray((K.shape[0], p_ion.shape[0]))*units.eV
-    for j, P in enumerate(p_ion):
-        icdf_at_P = np.ndarray(K.shape) * units.eV
-        icdf_at_P[:] = np.nan
-        for shell in reversed(shells):
-            icdf_at_P[P <= shell['Pcum_at_K']] = shell['B']
-        ionization_icdf[:, j] = icdf_at_P
-    # Round-off error in Pcum_at_K may cause the last icdf_at_P to remain undefined
-    nans = np.logical_not(np.isfinite(ionization_icdf[:,-1]))
-    ionization_icdf[nans,-1] = ionization_icdf[nans,-2]
+    # Build Inverse Cumulative Distribution Function
+    icdf = np.zeros((len(K), len(omega_frac), len(P))) * units.eV
+    icdf[:] = np.nan
+    for shell in reversed(shells):
+        icdf[np.logical_and(
+                shell['DIMFP'][:,:,np.newaxis] > 0/units.nm,
+                P[np.newaxis, np.newaxis, :] <= shell['P_cum'][:,:,np.newaxis]
+            )] = shell['B']
 
-    return ionization_icdf
+    return icdf

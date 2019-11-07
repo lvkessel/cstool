@@ -4,7 +4,7 @@ from cstool.phonon import phonon_cs_fn
 from cstool.dielectric_function import dimfp_kieft, elf_full_penn, \
     compile_full_imfp_icdf, compile_ashley_imfp_icdf
 from cstool.compile import compute_tcs_icdf
-from cstool.endf import ionization_shells, compile_ionization_icdf
+from cstool.endf import compile_ionization_icdf
 from cslib import units
 from cslib.numeric import log_interpolate_f
 
@@ -140,12 +140,14 @@ if __name__ == "__main__":
     
         # Ionization
         print("# Computing ionization energy probabilities")
-        e_ion = np.geomspace(1, max_energy.to(units.eV).magnitude, 1024) * units.eV
+        e_ion = np.geomspace(1, max_energy.to(units.eV).magnitude, 128) * units.eV
+        e_frac = np.geomspace(1e-4, 1, 1024) * units.dimensionless
         p_ion = np.linspace(0.0, 1.0, 1024)
-        ionization_icdf = compile_ionization_icdf(ionization_shells(s), e_ion, p_ion)
-    
+        ionization_icdf = compile_ionization_icdf(s, e_ion, e_frac, p_ion)
+
         ionization_grp = outfile.create_group("ionization")
         ionization_grp.add_scale("energy", e_ion, 'eV')
-        ionization_grp.add_dataset("binding_icdf", ionization_icdf, ("energy", None), 'eV')
-    
+        ionization_grp.add_scale("loss_frac", e_frac, '')
+        ionization_grp.add_dataset("binding_icdf", ionization_icdf, ("energy", "loss_frac", None), 'eV')
+
         ionization_grp.add_dataset("outer_shells", s.elf_file.get_outer_shells(), None, 'eV')

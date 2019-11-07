@@ -1,4 +1,4 @@
-from .ionization import ionization_shells, compile_ionization_icdf
+from .ionization import compile_ionization_icdf
 
-__all__ = ['ionization_shells', 'compile_ionization_icdf']
+__all__ = ['compile_ionization_icdf']
 
